@@ -1,0 +1,383 @@
+---
+title: "Kejun_Cai - Project"
+output: html_document
+date: "2023-06-07"
+---
+
+# Section 1 Introduction
+
+In the paper, authors outline the data structures they formed and use to examine their topics of interest. Specifically, they include data from over 500 mice, with each mouse containing multiple sessions, that each contain thousands of trials in which the mouse must make behavioral choices between stimuli. They then correlate the behaviors of these mice with neural activity from thousands of neurons to form multiple neural datasets. From these datasets, they look at the activity patterns of single cells and populations of cells, the correlation of neurons during trials, the changes in activity across trials, as well as the homogeneity and heterogeneity across sessions and mice.
+
+# Section 2 Exploratory analysis. 
+
+```{r}
+library(caret)
+library(pROC)
+library(e1071)
+library(randomForest)
+library(rpart)
+library(dplyr)
+library(ggplot2)
+library("dplyr")
+```
+
+```{r}
+session=list()
+for(i in 1:18){
+  session[[i]]=readRDS(paste('/Users/cck777/Downloads/sessions/session',i,'.rds',sep=''))
+  session[[i]]$unique_brain_area <- unique(session[[i]]$brain_area)
+  session[[i]]$neuron_number <- dim(session[[i]]$spks[[1]])[1]
+  session[[i]]$trials <- length(session[[i]]$contrast_right)
+  # print(session[[i]]$mouse_name)
+  # print(session[[i]]$date_exp)
+  
+}
+```
+
+In section 2, I will present some key variables
+```{r}
+session3 <- session[[3]]
+trials_num <- sapply(session, function(x) x$trials)
+neurons_num <- sapply(session, function(x) x$neuron_number)
+```
+
+```{r}
+summary(neurons_num)
+```
+we can see the distribution skewed towards right 
+
+```{r}
+summary(trials_num)
+```
+we can see the distribution skewed towards right
+
+## count of feedback_type
+```{r, echo=FALSE}
+table(session3$feedback_type)
+```
+77 "-1", 151 "1"
+
+## count of brain_area 
+```{r}
+table(session3$brain_area)
+```
+
+## Left Contrast Distribution
+```{r}
+summary(session3$contrast_left)
+hist(session3$contrast_left, main = "Histogram of contrast_left", xlab = "contrast_left")
+```
+## Right Contrast Distribution
+```{r}
+summary(session3$contrast_right)
+hist(session3$contrast_right, main = "Histogram of contrast_right", xlab = "contrast_right")
+```
+
+## Group the data and do further analysis
+```{r}
+n.session=length(session)
+
+# in library tidyverse
+meta <- tibble(
+  mouse_name = rep('name',n.session),
+  date_exp =rep('dt',n.session),
+  n_brain_area = rep(0,n.session),
+  n_neurons = rep(0,n.session),
+  n_trials = rep(0,n.session),
+  success_rate = rep(0,n.session)
+)
+
+
+for(i in 1:n.session){
+  tmp = session[[i]];
+  meta[i,1]=tmp$mouse_name;
+  meta[i,2]=tmp$date_exp;
+  meta[i,3]=length(unique(tmp$brain_area));
+  meta[i,4]=dim(tmp$spks[[1]])[1];
+  meta[i,5]=length(tmp$feedback_type);
+  meta[i,6]=mean(tmp$feedback_type+1)/2;
+  }
+```
+
+```{r}
+# Scatter plot of n_trials vs. success_rate
+ggplot(meta, aes(x = n_brain_area, y = n_neurons)) +
+  geom_point(color = "steelblue") +
+  labs(title = "Number of Brain Areas vs. Number of Neurons",
+       x = "Number of Brain Areas",
+       y = "Number of Neurons")
+
+```
+
+```{r}
+# Scatter plot of n_trials vs. success_rate
+ggplot(meta, aes(x = n_trials, y = success_rate)) +
+  geom_point(color = "steelblue") +
+  labs(title = "Number of Trials vs. Success Rate",
+       x = "Number of Trials",
+       y = "Success Rate")
+
+```
+
+```{r}
+# Convert date_exp to Date format
+meta$date_exp <- as.Date(meta$date_exp)
+
+# Line plot of success rate over time
+ggplot(meta, aes(x = date_exp, y = success_rate)) +
+  geom_line(color = "steelblue") +
+  labs(title = "Success Rate Over Time",
+       x = "Experiment Date",
+       y = "Success Rate")
+
+```
+
+```{r}
+# Grouped bar plot of brain areas and success rate
+ggplot(meta, aes(x = n_brain_area, fill = success_rate)) +
+  geom_bar(position = "dodge") +
+  labs(title = "Brain Areas and Success Rate",
+       x = "Number of Brain Areas",
+       y = "Count",
+       fill = "Success Rate")
+```
+
+
+##Section 3 Data integration
+###Create the data frame
+
+```{r}
+data <- data.frame(n_brain_area = numeric(),
+                   n_neurous = numeric(),
+                   feedback_type = numeric())
+
+for (i in 1:114) {
+  for (j in 1:18) {
+    # Extract columns we need from the sessions
+    n_brain_area <- length(unique(session[[j]]$brain_area))
+    n_neurous <- sum(session[[j]]$spks[[i]] == 1)
+    feedback_type <- session[[j]]$feedback_type[i]
+    
+    # create the data frame
+    temp_df <- data.frame(n_brain_area, n_neurous, feedback_type)
+    
+    data <- rbind(data, temp_df)
+  }
+}
+
+# Check the data we get
+head(data,6)
+```
+###Create the data frame
+
+####process y - feedback(1 as 1 and -1 as 0)
+```{r}
+# process y - feedback
+## 1 as 1 and -1 as 0
+data$feedback_type <- ifelse(data$feedback_type == 1, 1, 0)
+head(data,6)
+```
+
+
+##Section 4 Predictive modeling
+
+###Define X and y
+```{r}
+# process y - feedback
+## 1 as 1 and -1 as 0
+X <- data[, c("n_brain_area", "n_neurous")]
+y <- data$feedback_type
+y <- as.factor(y)
+```
+
+###Split the data into train (70%) and test (30%) sets
+####Do an additional split to prevent overfitting
+```{r}
+#split
+trainIndex <- createDataPartition(y, p = 0.7, list = FALSE)
+train_X <- X[trainIndex, ]
+train_y <- y[trainIndex]
+test_X <- X[-trainIndex, ]
+test_y <- y[-trainIndex]
+```
+
+###Logistic Regression
+####built the LR model
+```{r}
+#built the LR model
+lr_model <- train(train_X, train_y, method = "glm", family = "binomial")
+lr_pred <- predict(lr_model, newdata = test_X)
+```
+####check the accuracy
+```{r}
+# check the accuracy
+lr_accuracy <- mean(lr_pred == test_y)
+lr_accuracy
+```
+
+#Check the confusion matrix
+```{r}
+#Check the confusion matrix
+lr_cm <- confusionMatrix(lr_pred, test_y)
+lr_cm
+```
+####Check how the model make the prediction(feature importance)
+```{r}
+coefficients <- coef(lr_model$finalModel)
+sorted_coefficients <- sort(abs(coefficients), decreasing = TRUE)
+barplot(sorted_coefficients,
+        horiz = TRUE,
+        main = "Logistic Regression: Feature Importance",
+        xlab = "Coefficient Magnitude",
+        ylab = "Feature",
+        las = 1,
+        cex.names = 0.4)
+```
+
+
+###Decision Tree
+####built the DT model
+```{r}
+#built the DT model
+dt_model <- rpart(train_y ~ ., data = data.frame(train_X, train_y),cp = 0.3)
+dt_pred <- predict(dt_model, newdata = data.frame(test_X), type = "prob")[, 2]
+```
+####check the accuracy
+```{r}
+# check the accuracy
+dt_pred <- as.numeric(dt_pred > 0.5) 
+dt_accuracy <- mean(dt_pred == test_y)
+dt_accuracy
+```
+
+#Check the confusion matrix
+```{r}
+#Check the confusion matrix
+dt_cm <- confusionMatrix(factor(dt_pred, levels = levels(test_y)), test_y)
+dt_cm
+```
+####Check how the model make the prediction(feature importance)
+```{r}
+dt_model <- rpart(y ~ ., data = data)
+plot(dt_model, uniform = TRUE, compress = TRUE, margin = 0.2)
+text(dt_model, use.n = TRUE, all = TRUE, cex = 0.8)
+```
+
+###Random Forest
+####built the RF model
+```{r}
+#built the RF model
+rf_model <- randomForest(train_X, train_y, mtry =1)
+rf_pred <- predict(rf_model, newdata = test_X)
+```
+####check the accuracy
+```{r}
+# check the accuracy
+rf_accuracy <- mean(rf_pred == test_y)
+rf_accuracy
+```
+
+#Check the confusion matrix
+```{r}
+#Check the confusion matrix
+rf_cm <- confusionMatrix(factor(rf_pred, levels = levels(test_y)), test_y)
+rf_cm
+```
+####Check how the model make the prediction(feature importance)
+```{r}
+varImpPlot(rf_model,main = "Random Forest: Feature Importance")
+```
+
+###SVM
+####built the SVM model
+```{r}
+#built the SVM model
+svm_model <- svm(train_X, train_y, C=0.01, gamma=0.1)
+svm_pred <- predict(svm_model, newdata = test_X)
+```
+####check the accuracy
+```{r}
+# check the accuracy
+svm_accuracy <- mean(svm_pred == test_y)
+svm_accuracy
+```
+
+#Check the confusion matrix
+```{r}
+#Check the confusion matrix
+svm_cm <- confusionMatrix(factor(svm_pred, levels = levels(test_y)), test_y)
+svm_cm
+```
+####Check how the model make the prediction(feature importance)
+
+```{r}
+support_vectors <- svm_model$SV
+importance <- apply(abs(support_vectors), 2, sum)
+barplot(importance,
+        horiz = TRUE,
+        main = "Support Vector Machine: Feature Importance",
+        xlab = "Coefficient Magnitude",
+        ylab = "Feature",
+        las = 1,
+        cex.names = 0.4)
+```
+
+##Section 5 Prediction performance on the test sets
+### Clean the data 
+
+```{r}
+test=list()
+for(i in 1:2){
+  test[[i]]=readRDS(paste('/Users/cck777/Downloads/test/test',i,'.rds',sep=''))
+}
+```
+
+
+```{r}
+data2 <- data.frame(n_brain_area = numeric(),
+                   n_neurous = numeric(),
+                   feedback_type = numeric())
+
+for (i in 1:100) {
+  for (j in 1:2) {
+    # Extract columns we need from the sessions
+    n_brain_area <- length(unique(test[[j]]$brain_area))
+    n_neurous <- sum(test[[j]]$spks[[i]] == 1)
+    feedback_type <- test[[j]]$feedback_type[i]
+    
+    # create the data frame
+    temp_df <- data.frame(n_brain_area, n_neurous, feedback_type)
+    
+    data2 <- rbind(data2, temp_df)
+  }
+}
+
+# Check the data we get
+data2
+```
+```{r}
+data2$feedback_type <- ifelse(data2$feedback_type == 1, 1, 0)
+head(data2,6)
+```
+
+```{r}
+X_test <- data[, c("n_brain_area", "n_neurous")]
+y_test <- data$feedback_type
+```
+
+###Make the Prediction
+```{r}
+lr_pred2 <- predict(lr_model, newdata = X_test)
+lr_accuracy_test <- mean(lr_pred2 == y_test)
+lr_accuracy_test
+```
+
+##discussion
+
+The accuracy achieved by the model is approximately 74%, which can be considered a reasonably good result. With such accuracy, the model demonstrates a significant capability to predict outcomes correctly. However, it is important to recognize that achieving a high accuracy rate is just one aspect of evaluating a model's performance. Despite its reasonably good accuracy, the model does have some limitations that should be taken into account. One of these limitations is its simplicity. By using a relatively straightforward model, we may not be capturing the full complexity of the underlying data and its intricate patterns. To overcome this limitation and further improve the accuracy, it is essential to explore more complex models.
+
+
+
+##reference
+Chatgpt
+Steinmetz, N.A., Zatka-Haas, P., Carandini, M. et al. Distributed coding of choice, action and engagement across the mouse brain. Nature 576, 266–273 (2019). https://doi.org/10.1038/s41586-019-1787-x
